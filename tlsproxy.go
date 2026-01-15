@@ -475,23 +475,6 @@ func cloneHeaders(h http.Header) map[string][]string {
 
 // ==================== MONITOR WEB SERVER ====================
 
-func StartMonitorServer(port int) {
-	http.HandleFunc("/", handleIndex)
-	http.HandleFunc("/api/entries", handleAPIEntries)
-	http.HandleFunc("/api/entry/", handleAPIEntry)
-	http.HandleFunc("/api/clear", handleAPIClear)
-	http.HandleFunc("/api/stats", handleAPIStats)
-	
-	addr := fmt.Sprintf(":%d", port)
-	log.Printf("[MONITOR] Starting monitor server on http://localhost%s", addr)
-	
-	go func() {
-		if err := http.ListenAndServe(addr, nil); err != nil {
-			log.Printf("[MONITOR] Server error: %v", err)
-		}
-	}()
-}
-
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	
@@ -802,17 +785,53 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
         
         .body-content {
-            background: #fafafa;
-            padding: 15px;
+            background: #1e1e1e;
+            padding: 20px;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
             font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
             font-size: 12px;
-            max-height: 400px;
+            line-height: 1.6;
+            max-height: 600px;
             overflow-y: auto;
             white-space: pre-wrap;
-            word-break: break-all;
+            word-break: break-word;
+            color: #d4d4d4;
+        }
+        
+        .body-content.json {
+            background: #1e1e1e;
+        }
+        
+        .body-content.html {
+            background: #fafafa;
             color: #333;
+        }
+        
+        .body-content.text {
+            background: #fafafa;
+            color: #333;
+        }
+        
+        /* JSON Syntax Highlighting */
+        .json-key {
+            color: #9cdcfe;
+        }
+        
+        .json-string {
+            color: #ce9178;
+        }
+        
+        .json-number {
+            color: #b5cea8;
+        }
+        
+        .json-boolean {
+            color: #569cd6;
+        }
+        
+        .json-null {
+            color: #569cd6;
         }
         
         .empty-state {
@@ -994,6 +1013,55 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             document.getElementById('avgTime').textContent = avgDuration.toFixed(0) + 'ms';
         }
         
+        function formatResponseBody(body, contentType) {
+            if (!body) return '<div style="color: #999;">No response body</div>';
+            
+            // Detect content type
+            const isJSON = contentType && (contentType.includes('application/json') || contentType.includes('application/javascript'));
+            const isHTML = contentType && contentType.includes('text/html');
+            const isXML = contentType && contentType.includes('xml');
+            
+            let formatted = body;
+            let className = 'text';
+            
+            if (isJSON) {
+                try {
+                    const parsed = JSON.parse(body);
+                    formatted = JSON.stringify(parsed, null, 2);
+                    formatted = syntaxHighlightJSON(formatted);
+                    className = 'json';
+                } catch (e) {
+                    formatted = escapeHtml(body);
+                }
+            } else if (isHTML || isXML) {
+                formatted = escapeHtml(body);
+                className = 'html';
+            } else {
+                formatted = escapeHtml(body);
+            }
+            
+            return '<div class="body-content ' + className + '">' + formatted + '</div>';
+        }
+        
+        function syntaxHighlightJSON(json) {
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                let cls = 'json-number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+        
         async function showDetails(id) {
             try {
                 const response = await fetch('/api/entry/' + id);
@@ -1016,7 +1084,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                 if (entry.StatusCode) {
                     html += '<div class="detail-section"><h3>Response Information</h3><div class="detail-grid">';
                     html += '<div class="label">Status:</div><div class="value"><span class="status ' + getStatusClass(entry.StatusCode) + '">' + entry.StatusCode + ' ' + escapeHtml(entry.StatusText) + '</span></div>';
-                    html += '<div class="label">Content-Type:</div><div class="value">' + escapeHtml(entry.ContentType) + '</div>';
+                    html += '<div class="label">Content-Type:</div><div class="value">' + escapeHtml(entry.ContentType || 'N/A') + '</div>';
                     html += '<div class="label">Duration:</div><div class="value">' + (entry.Duration ? (entry.Duration / 1000000).toFixed(2) + 'ms' : 'N/A') + '</div>';
                     html += '</div></div>';
                 }
@@ -1028,7 +1096,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
                 }
                 
                 if (entry.ResponseBody) {
-                    html += '<div class="detail-section"><h3>Response Body</h3><div class="body-content">' + escapeHtml(entry.ResponseBody) + '</div></div>';
+                    html += '<div class="detail-section"><h3>Response Body</h3>' + formatResponseBody(entry.ResponseBody, entry.ContentType) + '</div>';
                 }
                 
                 modalBody.innerHTML = html;
@@ -1044,7 +1112,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             
             return Object.entries(headers).map(([name, values]) => {
                 const valueStr = Array.isArray(values) ? values.join(', ') : values;
-                return '<div class="header-item"><span class="header-name">' + escapeHtml(name) + ':</span><span class="header-value">' + escapeHtml(valueStr) + '</span></div>';
+                return '<div class="header-item"><span class="header-name">' + escapeHtml(name) + ':</span> <span class="header-value">' + escapeHtml(valueStr) + '</span></div>';
             }).join('');
         }
         
