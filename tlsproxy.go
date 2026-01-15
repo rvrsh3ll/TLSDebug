@@ -193,7 +193,7 @@ func exportResponseCookies(resp *http.Response) {
 
 		domain := cookie.Domain
 		hostOnly := cookie.Domain == ""
-		
+
 		if domain == "" {
 			if resp.Request != nil {
 				domain = resp.Request.URL.Hostname()
@@ -254,7 +254,7 @@ func exportResponseCookies(resp *http.Response) {
 func sanitizeForConsole(data string) string {
 	var result strings.Builder
 	result.Grow(len(data))
-	
+
 	for _, r := range data {
 		if r == '\n' || r == '\r' || r == '\t' {
 			result.WriteRune(r)
@@ -266,7 +266,7 @@ func sanitizeForConsole(data string) string {
 			result.WriteString(fmt.Sprintf("\\x%02x", r))
 		}
 	}
-	
+
 	return result.String()
 }
 
@@ -274,15 +274,15 @@ func isBinaryContent(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	
+
 	sampleSize := 512
 	if len(data) < sampleSize {
 		sampleSize = len(data)
 	}
-	
+
 	nullCount := 0
 	controlCount := 0
-	
+
 	for i := 0; i < sampleSize; i++ {
 		b := data[i]
 		if b == 0 {
@@ -292,7 +292,7 @@ func isBinaryContent(data []byte) bool {
 			controlCount++
 		}
 	}
-	
+
 	return nullCount > sampleSize/10 || controlCount > sampleSize*3/10
 }
 
@@ -335,12 +335,12 @@ var trafficStore = &TrafficStore{
 func (ts *TrafficStore) AddEntry(entry TrafficEntry) {
 	ts.Lock()
 	defer ts.Unlock()
-	
+
 	entry.ID = ts.nextID
 	ts.nextID++
-	
+
 	ts.entries = append(ts.entries, entry)
-	
+
 	if len(ts.entries) > ts.maxEntries {
 		ts.entries = ts.entries[len(ts.entries)-ts.maxEntries:]
 	}
@@ -349,19 +349,19 @@ func (ts *TrafficStore) AddEntry(entry TrafficEntry) {
 func (ts *TrafficStore) GetEntries() []TrafficEntry {
 	ts.RLock()
 	defer ts.RUnlock()
-	
+
 	result := make([]TrafficEntry, len(ts.entries))
 	for i, entry := range ts.entries {
 		result[len(ts.entries)-1-i] = entry
 	}
-	
+
 	return result
 }
 
 func (ts *TrafficStore) GetEntry(id int) *TrafficEntry {
 	ts.RLock()
 	defer ts.RUnlock()
-	
+
 	for _, entry := range ts.entries {
 		if entry.ID == id {
 			return &entry
@@ -373,7 +373,7 @@ func (ts *TrafficStore) GetEntry(id int) *TrafficEntry {
 func (ts *TrafficStore) Clear() {
 	ts.Lock()
 	defer ts.Unlock()
-	
+
 	ts.entries = make([]TrafficEntry, 0)
 }
 
@@ -406,7 +406,7 @@ func (m *MonitoringModule) ProcessRequest(req *http.Request) error {
 
 func (m *MonitoringModule) ProcessResponse(resp *http.Response) error {
 	startTime := time.Now()
-	
+
 	entry := TrafficEntry{
 		Timestamp:       startTime,
 		Method:          resp.Request.Method,
@@ -420,14 +420,21 @@ func (m *MonitoringModule) ProcessResponse(resp *http.Response) error {
 		ContentType:     resp.Header.Get("Content-Type"),
 		ClientAddr:      "",
 	}
-	
+
 	if m.captureResponseBodies && resp.Body != nil {
-		// Check if the response is compressed
 		encoding := resp.Header.Get("Content-Encoding")
-		
+
+		// Skip unsupported compressions
+		if encoding == "br" || encoding == "zstd" || encoding == "deflate" {
+			entry.ResponseBody = fmt.Sprintf("[Content compressed with %s - cannot display]", encoding)
+			entry.Duration = time.Since(startTime)
+			trafficStore.AddEntry(entry)
+			return nil
+		}
+
 		var reader io.Reader = resp.Body
-		
-		// Decompress gzip if needed
+		wasCompressed := false
+
 		if encoding == "gzip" {
 			gzipReader, err := gzip.NewReader(resp.Body)
 			if err != nil {
@@ -436,34 +443,36 @@ func (m *MonitoringModule) ProcessResponse(resp *http.Response) error {
 			} else {
 				reader = gzipReader
 				defer gzipReader.Close()
+				wasCompressed = true
 			}
 		}
-		
-		// Read the (potentially decompressed) body
+
 		bodyBytes, err := io.ReadAll(reader)
 		if err == nil {
-			// Restore the body for other modules/handlers
 			resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			
-			// Only capture text content
+
+			if wasCompressed {
+				resp.Header.Del("Content-Encoding")
+				resp.ContentLength = int64(len(bodyBytes))
+				resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+			}
+
 			if !isBinaryContent(bodyBytes) && len(bodyBytes) <= m.maxBodySize {
 				entry.ResponseBody = string(bodyBytes)
 			} else if len(bodyBytes) > m.maxBodySize {
-				entry.ResponseBody = string(bodyBytes[:m.maxBodySize]) + 
+				entry.ResponseBody = string(bodyBytes[:m.maxBodySize]) +
 					fmt.Sprintf("... [truncated, %d more bytes]", len(bodyBytes)-m.maxBodySize)
 			} else {
 				entry.ResponseBody = fmt.Sprintf("[Binary content, %d bytes]", len(bodyBytes))
 			}
 		}
 	}
-	
+
 	entry.Duration = time.Since(startTime)
-	
 	trafficStore.AddEntry(entry)
-	
+
 	return nil
 }
-
 
 func cloneHeaders(h http.Header) map[string][]string {
 	clone := make(map[string][]string)
@@ -475,9 +484,26 @@ func cloneHeaders(h http.Header) map[string][]string {
 
 // ==================== MONITOR WEB SERVER ====================
 
+func StartMonitorServer(port int) {
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/api/entries", handleAPIEntries)
+	http.HandleFunc("/api/entry/", handleAPIEntry)
+	http.HandleFunc("/api/clear", handleAPIClear)
+	http.HandleFunc("/api/stats", handleAPIStats)
+
+	addr := fmt.Sprintf(":%d", port)
+	log.Printf("[MONITOR] Starting monitor server on http://localhost%s", addr)
+
+	go func() {
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			log.Printf("[MONITOR] Server error: %v", err)
+		}
+	}()
+}
+
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	
+
 	htmlPage := `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -751,7 +777,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         
         .detail-grid .value {
             color: #333;
-            font-size: 13px;
+    		font-size: 13px;
+   	 		word-break: break-all;
+    		overflow-wrap: break-word;
         }
         
         .headers-list {
@@ -1148,7 +1176,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
     </script>
 </body>
 </html>`
-	
+
 	fmt.Fprint(w, htmlPage)
 }
 
@@ -1160,17 +1188,17 @@ func handleAPIEntries(w http.ResponseWriter, r *http.Request) {
 
 func handleAPIEntry(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	idStr := strings.TrimPrefix(r.URL.Path, "/api/entry/")
 	var id int
 	fmt.Sscanf(idStr, "%d", &id)
-	
+
 	entry := trafficStore.GetEntry(id)
 	if entry == nil {
 		http.NotFound(w, r)
 		return
 	}
-	
+
 	json.NewEncoder(w).Encode(entry)
 }
 
@@ -1179,7 +1207,7 @@ func handleAPIClear(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	trafficStore.Clear()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -1187,16 +1215,16 @@ func handleAPIClear(w http.ResponseWriter, r *http.Request) {
 
 func handleAPIStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	entries := trafficStore.GetEntries()
-	
+
 	stats := map[string]interface{}{
 		"total":       len(entries),
 		"methods":     countByMethod(entries),
 		"statusCodes": countByStatusCode(entries),
 		"hosts":       countByHost(entries),
 	}
-	
+
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -1223,7 +1251,7 @@ func countByHost(entries []TrafficEntry) []map[string]interface{} {
 	for _, entry := range entries {
 		counts[entry.Host]++
 	}
-	
+
 	type hostCount struct {
 		host  string
 		count int
@@ -1235,7 +1263,7 @@ func countByHost(entries []TrafficEntry) []map[string]interface{} {
 	sort.Slice(hosts, func(i, j int) bool {
 		return hosts[i].count > hosts[j].count
 	})
-	
+
 	result := make([]map[string]interface{}, 0)
 	for i, hc := range hosts {
 		if i >= 10 {
@@ -1246,7 +1274,7 @@ func countByHost(entries []TrafficEntry) []map[string]interface{} {
 			"count": hc.count,
 		})
 	}
-	
+
 	return result
 }
 
@@ -1279,26 +1307,26 @@ func (m *OAuthModule) Name() string {
 func (m *OAuthModule) ShouldLog(req *http.Request) bool {
 	url := req.URL.String()
 	path := strings.ToLower(req.URL.Path)
-	
+
 	oauthPatterns := []string{
 		"/oauth", "/auth", "/login", "/token", "/authorize",
 		"access_token", "refresh_token", "client_id", "client_secret",
 		"/connect", "/callback", "/.well-known/openid",
 	}
-	
+
 	for _, pattern := range oauthPatterns {
-		if strings.Contains(strings.ToLower(url), pattern) || 
-		   strings.Contains(path, pattern) {
+		if strings.Contains(strings.ToLower(url), pattern) ||
+			strings.Contains(path, pattern) {
 			log.Printf("[OAuth] Detected OAuth flow: %s", url)
 			return true
 		}
 	}
-	
+
 	if authHeader := req.Header.Get("Authorization"); authHeader != "" {
 		log.Printf("[OAuth] Detected Authorization header")
 		return true
 	}
-	
+
 	return false
 }
 
@@ -1354,14 +1382,14 @@ func (m *RequestModifierModule) ProcessRequest(req *http.Request) error {
 		req.Header.Set(key, value)
 		log.Printf("[RequestModifier] Added header: %s: %s", key, value)
 	}
-	
+
 	for _, key := range m.RemoveHeaders {
 		if req.Header.Get(key) != "" {
 			req.Header.Del(key)
 			log.Printf("[RequestModifier] Removed header: %s", key)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1391,14 +1419,14 @@ func (m *ResponseModifierModule) ProcessResponse(resp *http.Response) error {
 		resp.Header.Set(key, value)
 		log.Printf("[ResponseModifier] Added header: %s: %s", key, value)
 	}
-	
+
 	for _, key := range m.RemoveHeaders {
 		if resp.Header.Get(key) != "" {
 			resp.Header.Del(key)
 			log.Printf("[ResponseModifier] Removed header: %s", key)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1452,7 +1480,7 @@ func (m *StringReplacementModule) ProcessRequest(req *http.Request) error {
 			strings.Contains(contentType, "application/xml") ||
 			strings.Contains(contentType, "application/x-www-form-urlencoded") ||
 			strings.Contains(contentType, "application/javascript")
-		
+
 		if !isText {
 			return nil
 		}
@@ -1460,7 +1488,7 @@ func (m *StringReplacementModule) ProcessRequest(req *http.Request) error {
 
 	var reader io.Reader = req.Body
 	encoding := req.Header.Get("Content-Encoding")
-	
+
 	if encoding == "gzip" {
 		gzipReader, err := gzip.NewReader(req.Body)
 		if err != nil {
@@ -1491,7 +1519,7 @@ func (m *StringReplacementModule) ProcessRequest(req *http.Request) error {
 	req.Body = io.NopCloser(bytes.NewBufferString(bodyStr))
 	req.ContentLength = int64(len(bodyStr))
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyStr)))
-	
+
 	if encoding != "" {
 		req.Header.Del("Content-Encoding")
 		log.Printf("[StringReplacement] Removed Content-Encoding: %s (returning uncompressed)", encoding)
@@ -1511,21 +1539,21 @@ func (m *StringReplacementModule) ProcessResponse(resp *http.Response) error {
 			strings.Contains(contentType, "application/json") ||
 			strings.Contains(contentType, "application/xml") ||
 			strings.Contains(contentType, "application/javascript")
-		
+
 		if !isText {
 			return nil
 		}
 	}
 
 	encoding := resp.Header.Get("Content-Encoding")
-	
+
 	if encoding == "br" || encoding == "zstd" || encoding == "deflate" {
 		log.Printf("[StringReplacement] Warning: Skipping response with unsupported compression: %s", encoding)
 		return nil
 	}
-	
+
 	var reader io.Reader = resp.Body
-	
+
 	if encoding == "gzip" {
 		gzipReader, err := gzip.NewReader(resp.Body)
 		if err != nil {
@@ -1556,7 +1584,7 @@ func (m *StringReplacementModule) ProcessResponse(resp *http.Response) error {
 	resp.Body = io.NopCloser(bytes.NewBufferString(bodyStr))
 	resp.ContentLength = int64(len(bodyStr))
 	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyStr)))
-	
+
 	if encoding != "" && encoding != "br" && encoding != "zstd" && encoding != "deflate" {
 		resp.Header.Del("Content-Encoding")
 		log.Printf("[StringReplacement] Removed Content-Encoding: %s (returning uncompressed)", encoding)
@@ -1577,32 +1605,32 @@ func (m *ForceGzipModule) ShouldLog(req *http.Request) bool {
 
 func (m *ForceGzipModule) ProcessRequest(req *http.Request) error {
 	acceptEncoding := req.Header.Get("Accept-Encoding")
-	
+
 	if acceptEncoding == "" {
 		return nil
 	}
-	
+
 	encodings := strings.Split(acceptEncoding, ",")
 	var supported []string
-	
+
 	for _, enc := range encodings {
 		enc = strings.TrimSpace(enc)
 		if strings.Contains(enc, "gzip") || enc == "identity" {
 			supported = append(supported, enc)
 		}
 	}
-	
+
 	if len(supported) == 0 {
 		supported = []string{"gzip"}
 	}
-	
+
 	newAcceptEncoding := strings.Join(supported, ", ")
-	
+
 	if newAcceptEncoding != acceptEncoding {
 		req.Header.Set("Accept-Encoding", newAcceptEncoding)
 		log.Printf("[ForceGzip] Modified Accept-Encoding from '%s' to '%s'", acceptEncoding, newAcceptEncoding)
 	}
-	
+
 	return nil
 }
 
@@ -1668,7 +1696,7 @@ func main() {
 		log.Printf("Verbose mode: ENABLED (all traffic logged to console)")
 		log.Printf("⚠️  Cookie Export: Sessions will be exported to EditThisCookie_Sessions.json")
 		log.Printf("WARNING: This file contains sensitive authentication data!")
-		
+
 		// Test write permissions
 		testFile := "EditThisCookie_Sessions.json"
 		testData := []EditThisCookieExport{}
@@ -1695,26 +1723,33 @@ func main() {
 
 func initializeModules() {
 	log.Println("Initializing logging modules...")
-	
+
 	// Register monitoring module FIRST to capture all traffic
-	RegisterModule(NewMonitoringModule())
-	
 	// Default: Log all traffic
 	RegisterModule(&AllTrafficModule{})
-	
+
+	// IMPORTANT: Register ForceGzip to prevent br/deflate compression
+
+	// TODO : add br module
+	RegisterModule(&ForceGzipModule{})
+
+	// Connect to host 4040 to see traffic in browser
+
+	RegisterModule(NewMonitoringModule())
+
 	// Uncomment to enable OAuth-only logging:
 	// RegisterModule(&OAuthModule{})
-	
+
 	// Uncomment to filter by domain:
 	// RegisterModule(&DomainFilterModule{
 	// 	Domains: []string{"example.com", "api.example.com"},
 	// })
-	
+
 	// Uncomment to filter by path:
 	// RegisterModule(&PathFilterModule{
 	// 	Paths: []string{"/api/", "/v1/"},
 	// })
-	
+
 	// Uncomment to modify requests:
 	// RegisterModule(&RequestModifierModule{
 	// 	AddHeaders: map[string]string{
@@ -1722,7 +1757,7 @@ func initializeModules() {
 	// 	},
 	// 	RemoveHeaders: []string{"User-Agent"},
 	// })
-	
+
 	// Uncomment to modify responses:
 	// RegisterModule(&ResponseModifierModule{
 	// 	AddHeaders: map[string]string{
@@ -1730,7 +1765,7 @@ func initializeModules() {
 	// 	},
 	// 	RemoveHeaders: []string{"Server"},
 	// })
-	
+
 	// Uncomment to replace strings:
 	// RegisterModule(&ForceGzipModule{})
 	// RegisterModule(&StringReplacementModule{
@@ -1740,7 +1775,7 @@ func initializeModules() {
 	// 		"security": "cuddles",
 	// 	},
 	// })
-	
+
 	log.Printf("Total modules registered: %d", len(logModules))
 }
 
@@ -1763,7 +1798,7 @@ func loadConfig(configPath string) *CertConfig {
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue
 		}
@@ -1896,7 +1931,7 @@ func generateCA(certPath, keyPath string, skipInstall bool) error {
 		if len(parts) == 2 {
 			ocspURL := strings.TrimSpace(parts[0])
 			caIssuerURL := strings.TrimSpace(parts[1])
-			
+
 			if ocspURL != "" {
 				template.OCSPServer = []string{ocspURL}
 				log.Printf("CA OCSP Server: %s", ocspURL)
@@ -1934,7 +1969,7 @@ func generateCA(certPath, keyPath string, skipInstall bool) error {
 	log.Printf("CA Organization: %s", certConfig.Organization)
 	log.Printf("CA Common Name: %s", certConfig.CommonName)
 	log.Printf("CA Validity: %d years", certConfig.ValidityYears)
-	
+
 	if skipInstall {
 		log.Println("Skipping automatic certificate installation (--skip-install flag)")
 		printManualInstallInstructions(certPath)
@@ -2186,19 +2221,19 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	executeModulesResponse(resp)
-	
+
 	return resp, nil
 }
 
 func logRequest(req *http.Request, config *ProxyConfig) {
 	shouldLog := executeModules(req)
-	
+
 	if !shouldLog {
 		return
 	}
-	
+
 	logMutex.Lock()
 	defer logMutex.Unlock()
 
@@ -2219,7 +2254,7 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 			contentType := req.Header.Get("Content-Type")
-			
+
 			if isBinaryContent(bodyBytes) {
 				logEntry = logEntry + fmt.Sprintf("Body: [Binary data, %d bytes]\n", len(bodyBytes))
 			} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
@@ -2333,7 +2368,7 @@ func generateCertForHost(hostname string) *tls.Certificate {
 			if len(parts) == 2 {
 				ocspURL := strings.TrimSpace(parts[0])
 				caIssuerURL := strings.TrimSpace(parts[1])
-				
+
 				if ocspURL != "" {
 					template.OCSPServer = []string{ocspURL}
 				}
@@ -2383,34 +2418,34 @@ func installCertWindows(certPath string) error {
 
 	log.Printf("Installing certificate to Windows trust store...")
 	log.Printf("Running: certutil -addstore -user Root \"%s\"", certPath)
-	
+
 	cmd := exec.Command("certutil", "-addstore", "-user", "Root", certPath)
 	output, err := cmd.CombinedOutput()
-	
+
 	if len(output) > 0 {
 		log.Printf("certutil output: %s", string(output))
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("certutil failed: %v - %s", err, string(output))
 	}
-	
+
 	log.Printf("Verifying certificate installation...")
 	verifyCmd := exec.Command("certutil", "-user", "-verifystore", "Root", "TLS Proxy Root CA")
 	verifyOutput, verifyErr := verifyCmd.CombinedOutput()
-	
+
 	if verifyErr != nil {
 		log.Printf("Warning: Could not verify certificate installation: %v", verifyErr)
 		log.Printf("Verification output: %s", string(verifyOutput))
 		return fmt.Errorf("certificate may not be installed correctly - please check manually")
 	}
-	
+
 	log.Printf("Certificate verified in trust store")
 	return nil
 }
 
 func installCertMacOS(certPath string) error {
-	cmd := exec.Command("sudo", "security", "add-trusted-cert", "-d", "-r", "trustRoot", 
+	cmd := exec.Command("sudo", "security", "add-trusted-cert", "-d", "-r", "trustRoot",
 		"-k", "/Library/Keychains/System.keychain", certPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2421,24 +2456,24 @@ func installCertMacOS(certPath string) error {
 
 func installCertLinux(certPath string) error {
 	destPath := "/usr/local/share/ca-certificates/tlsproxy.crt"
-	
+
 	input, err := os.ReadFile(certPath)
 	if err != nil {
 		return err
 	}
-	
+
 	cmd := exec.Command("sudo", "tee", destPath)
 	cmd.Stdin = bytes.NewReader(input)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to copy certificate: %v", err)
 	}
-	
+
 	cmd = exec.Command("sudo", "update-ca-certificates")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, string(output))
 	}
-	
+
 	return nil
 }
 
@@ -2476,24 +2511,24 @@ func uninstallCertMacOS() error {
 
 func uninstallCertLinux() error {
 	destPath := "/usr/local/share/ca-certificates/tlsproxy.crt"
-	
+
 	cmd := exec.Command("sudo", "rm", "-f", destPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to remove certificate: %v", err)
 	}
-	
+
 	cmd = exec.Command("sudo", "update-ca-certificates")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, string(output))
 	}
-	
+
 	return nil
 }
 
 func printManualInstallInstructions(certPath string) {
 	absPath, _ := filepath.Abs(certPath)
-	
+
 	switch runtime.GOOS {
 	case "windows":
 		log.Println("")
