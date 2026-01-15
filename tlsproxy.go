@@ -30,7 +30,6 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
-	"html"
 	"io"
 	"log"
 	"math/big"
@@ -101,6 +100,7 @@ var (
 	logMutex    sync.Mutex
 	logWriter   *os.File
 	logModules  []LogModule
+	verboseMode bool
 )
 
 type LogModule interface {
@@ -137,6 +137,118 @@ func executeModulesResponse(resp *http.Response) error {
 		}
 	}
 	return nil
+}
+
+// EditThisCookie export format
+type EditThisCookieExport struct {
+	Domain         string  `json:"domain"`
+	ExpirationDate float64 `json:"expirationDate"`
+	HostOnly       bool    `json:"hostOnly"`
+	HttpOnly       bool    `json:"httpOnly"`
+	Name           string  `json:"name"`
+	Path           string  `json:"path"`
+	SameSite       string  `json:"sameSite"`
+	Secure         bool    `json:"secure"`
+	Session        bool    `json:"session"`
+	StoreId        string  `json:"storeId"`
+	Value          string  `json:"value"`
+}
+
+func exportResponseCookies(resp *http.Response) {
+	if resp == nil || resp.Header == nil {
+		return
+	}
+
+	setCookies := resp.Cookies()
+	if len(setCookies) == 0 {
+		return
+	}
+
+	filename := "EditThisCookie_Sessions.json"
+	var exportData []EditThisCookieExport
+
+	// Read existing data if file exists
+	if data, err := os.ReadFile(filename); err == nil {
+		json.Unmarshal(data, &exportData)
+	}
+
+	// Create map for deduplication (key: name+domain)
+	cookieMap := make(map[string]EditThisCookieExport)
+	for _, existing := range exportData {
+		key := existing.Name + "|" + existing.Domain
+		cookieMap[key] = existing
+	}
+
+	// Convert Set-Cookie response cookies to EditThisCookie format
+	for _, cookie := range setCookies {
+		sameSite := "unspecified"
+		switch cookie.SameSite {
+		case http.SameSiteStrictMode:
+			sameSite = "strict"
+		case http.SameSiteLaxMode:
+			sameSite = "lax"
+		case http.SameSiteNoneMode:
+			sameSite = "no_restriction"
+		}
+
+		domain := cookie.Domain
+		hostOnly := cookie.Domain == ""
+		
+		if domain == "" {
+			if resp.Request != nil {
+				domain = resp.Request.URL.Hostname()
+				if domain == "" {
+					domain = resp.Request.Host
+				}
+			}
+		}
+
+		path := cookie.Path
+		if path == "" {
+			path = "/"
+		}
+
+		etcCookie := EditThisCookieExport{
+			Domain:         domain,
+			ExpirationDate: 0,
+			HostOnly:       hostOnly,
+			HttpOnly:       cookie.HttpOnly,
+			Name:           cookie.Name,
+			Path:           path,
+			SameSite:       sameSite,
+			Secure:         cookie.Secure,
+			Session:        cookie.MaxAge == 0 && cookie.Expires.IsZero(),
+			StoreId:        "0",
+			Value:          cookie.Value,
+		}
+
+		if !cookie.Expires.IsZero() {
+			etcCookie.ExpirationDate = float64(cookie.Expires.Unix()) + float64(cookie.Expires.Nanosecond())/1e9
+		}
+
+		key := etcCookie.Name + "|" + etcCookie.Domain
+		cookieMap[key] = etcCookie
+	}
+
+	// Convert map back to array
+	exportData = make([]EditThisCookieExport, 0, len(cookieMap))
+	for _, cookie := range cookieMap {
+		exportData = append(exportData, cookie)
+	}
+
+	jsonData, err := json.MarshalIndent(exportData, "", "    ")
+	if err != nil {
+		log.Printf("[EXPORT] ERROR: Failed to marshal JSON: %v", err)
+		return
+	}
+
+	err = os.WriteFile(filename, jsonData, 0644)
+	if err != nil {
+		log.Printf("[EXPORT] ERROR: Failed to write file %s: %v", filename, err)
+		return
+	}
+
+	log.Printf("[EXPORT] ✓ %d unique cookies in %s", len(exportData), filename)
 }
 
 func sanitizeForConsole(data string) string {
@@ -365,7 +477,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TLS Proxy Monitor</title>
+    <title>Proxy Monitor</title>
     <style>
         * {
             margin: 0;
@@ -374,120 +486,113 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: #1a1a1a;
-            color: #e0e0e0;
-            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 0;
         }
         
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 25px;
-            border-radius: 12px;
-            margin-bottom: 25px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            background: #fff;
+            padding: 20px 30px;
+            border-bottom: 1px solid #e0e0e0;
         }
         
         .header h1 {
-            color: white;
-            font-size: 28px;
-            margin-bottom: 10px;
+            color: #333;
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 15px;
         }
         
         .stats {
             display: flex;
-            gap: 20px;
-            margin-top: 15px;
+            gap: 30px;
             flex-wrap: wrap;
         }
         
         .stat-box {
-            background: rgba(255,255,255,0.1);
-            padding: 12px 20px;
-            border-radius: 8px;
-            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
         }
         
         .stat-box .label {
-            font-size: 12px;
-            opacity: 0.8;
+            font-size: 11px;
+            color: #666;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
         }
         
         .stat-box .value {
-            font-size: 24px;
-            font-weight: bold;
-            margin-top: 5px;
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
         }
         
         .controls {
-            background: #2a2a2a;
-            padding: 20px;
-            border-radius: 12px;
-            margin-bottom: 20px;
+            background: #fff;
+            padding: 15px 30px;
+            border-bottom: 1px solid #e0e0e0;
             display: flex;
-            gap: 15px;
+            gap: 10px;
             flex-wrap: wrap;
             align-items: center;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
         }
         
         .controls input[type="text"] {
             flex: 1;
             min-width: 250px;
-            padding: 10px 15px;
-            border: 2px solid #3a3a3a;
-            border-radius: 8px;
-            background: #1a1a1a;
-            color: #e0e0e0;
-            font-size: 14px;
-            transition: border-color 0.3s;
+            padding: 8px 12px;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
+            font-size: 13px;
         }
         
         .controls input[type="text"]:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: #999;
         }
         
         .controls button {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 8px;
-            background: #667eea;
-            color: white;
+            padding: 8px 16px;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
             cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
-            transition: all 0.3s;
+            font-size: 13px;
+            font-weight: 500;
         }
         
         .controls button:hover {
-            background: #5568d3;
-            transform: translateY(-1px);
+            background: #f5f5f5;
         }
         
         .controls button.danger {
-            background: #e74c3c;
+            color: #d32f2f;
+            border-color: #d32f2f;
         }
         
         .controls button.danger:hover {
-            background: #c0392b;
+            background: #ffebee;
         }
         
         .controls label {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
             cursor: pointer;
             user-select: none;
+            font-size: 13px;
+            color: #666;
         }
         
         .table-container {
-            background: #2a2a2a;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            background: #fff;
+            margin: 0;
         }
         
         table {
@@ -496,69 +601,66 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
         
         thead {
-            background: #3a3a3a;
+            background: #fafafa;
+            border-top: 1px solid #e0e0e0;
+            border-bottom: 1px solid #e0e0e0;
         }
         
         th {
-            padding: 15px;
+            padding: 12px 20px;
             text-align: left;
             font-weight: 600;
-            color: #b0b0b0;
+            color: #666;
+            font-size: 11px;
             text-transform: uppercase;
-            font-size: 12px;
-            letter-spacing: 1px;
-            border-bottom: 2px solid #4a4a4a;
+            letter-spacing: 0.5px;
         }
         
         tbody tr {
-            border-bottom: 1px solid #3a3a3a;
-            transition: background 0.2s;
+            border-bottom: 1px solid #f0f0f0;
             cursor: pointer;
         }
         
         tbody tr:hover {
-            background: #333333;
+            background: #fafafa;
         }
         
         td {
-            padding: 15px;
-            font-size: 14px;
+            padding: 12px 20px;
+            font-size: 13px;
+            color: #333;
         }
         
         .method {
-            font-weight: bold;
-            padding: 4px 10px;
-            border-radius: 6px;
-            display: inline-block;
-            font-size: 12px;
+            font-weight: 600;
+            font-size: 11px;
+            color: #666;
         }
         
-        .method.GET { background: #27ae60; color: white; }
-        .method.POST { background: #f39c12; color: white; }
-        .method.PUT { background: #3498db; color: white; }
-        .method.DELETE { background: #e74c3c; color: white; }
-        .method.PATCH { background: #9b59b6; color: white; }
+        .method.GET { color: #2e7d32; }
+        .method.POST { color: #f57c00; }
+        .method.PUT { color: #1976d2; }
+        .method.DELETE { color: #d32f2f; }
+        .method.PATCH { color: #7b1fa2; }
         
         .status {
-            font-weight: bold;
-            padding: 4px 10px;
-            border-radius: 6px;
-            display: inline-block;
+            font-weight: 600;
             font-size: 12px;
         }
         
-        .status.success { background: #27ae60; color: white; }
-        .status.redirect { background: #3498db; color: white; }
-        .status.client-error { background: #e67e22; color: white; }
-        .status.server-error { background: #e74c3c; color: white; }
+        .status.success { color: #2e7d32; }
+        .status.redirect { color: #1976d2; }
+        .status.client-error { color: #f57c00; }
+        .status.server-error { color: #d32f2f; }
         
         .url {
-            color: #6eb5ff;
+            color: #1976d2;
             word-break: break-all;
+            font-size: 13px;
         }
         
         .timestamp {
-            color: #95a5a6;
+            color: #999;
             font-size: 12px;
         }
         
@@ -569,19 +671,19 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.8);
+            background: rgba(0,0,0,0.5);
             z-index: 1000;
             padding: 20px;
             overflow-y: auto;
         }
         
         .modal-content {
-            background: #2a2a2a;
+            background: #fff;
             max-width: 1200px;
             margin: 40px auto;
-            border-radius: 12px;
+            border-radius: 4px;
             padding: 30px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         
         .modal-header {
@@ -590,24 +692,26 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             align-items: center;
             margin-bottom: 25px;
             padding-bottom: 15px;
-            border-bottom: 2px solid #3a3a3a;
+            border-bottom: 1px solid #e0e0e0;
         }
         
         .modal-header h2 {
-            color: #667eea;
+            color: #333;
+            font-size: 18px;
+            font-weight: 600;
         }
         
         .close-btn {
             background: none;
             border: none;
-            color: #95a5a6;
-            font-size: 32px;
+            color: #999;
+            font-size: 28px;
             cursor: pointer;
-            transition: color 0.3s;
+            line-height: 1;
         }
         
         .close-btn:hover {
-            color: #e74c3c;
+            color: #333;
         }
         
         .detail-section {
@@ -615,79 +719,89 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
         
         .detail-section h3 {
-            color: #667eea;
+            color: #333;
             margin-bottom: 12px;
-            font-size: 18px;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         
         .detail-grid {
             display: grid;
             grid-template-columns: 150px 1fr;
             gap: 10px;
-            background: #1a1a1a;
+            background: #fafafa;
             padding: 15px;
-            border-radius: 8px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
         }
         
         .detail-grid .label {
-            color: #95a5a6;
+            color: #666;
             font-weight: 600;
+            font-size: 12px;
         }
         
         .detail-grid .value {
-            color: #e0e0e0;
-        }
-        
-        .headers-list {
-            background: #1a1a1a;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: 'Courier New', monospace;
+            color: #333;
             font-size: 13px;
         }
         
+        .headers-list {
+            background: #fafafa;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            font-size: 12px;
+        }
+        
         .header-item {
-            margin-bottom: 8px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid #3a3a3a;
+            margin-bottom: 6px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid #e0e0e0;
         }
         
         .header-item:last-child {
             border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
         }
         
         .header-name {
-            color: #f39c12;
-            font-weight: bold;
+            color: #1976d2;
+            font-weight: 600;
         }
         
         .header-value {
-            color: #95a5a6;
-            margin-left: 10px;
+            color: #666;
         }
         
         .body-content {
-            background: #1a1a1a;
+            background: #fafafa;
             padding: 15px;
-            border-radius: 8px;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            font-size: 12px;
             max-height: 400px;
             overflow-y: auto;
             white-space: pre-wrap;
             word-break: break-all;
+            color: #333;
         }
         
         .empty-state {
             text-align: center;
             padding: 60px 20px;
-            color: #95a5a6;
+            color: #999;
         }
         
         .empty-state-icon {
-            font-size: 64px;
-            margin-bottom: 20px;
-            opacity: 0.5;
+            font-size: 48px;
+            margin-bottom: 15px;
+            opacity: 0.3;
         }
         
         @media (max-width: 768px) {
@@ -701,13 +815,14 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             
             .stats {
                 flex-direction: column;
+                gap: 15px;
             }
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🔒 TLS Proxy Monitor</h1>
+        <h1>TLS Proxy Monitor</h1>
         <div class="stats">
             <div class="stat-box">
                 <div class="label">Total Requests</div>
@@ -725,13 +840,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
     </div>
     
     <div class="controls">
-        <input type="text" id="searchBox" placeholder="🔍 Search by URL, host, method, or status...">
+        <input type="text" id="searchBox" placeholder="Filter by URL, host, method, or status...">
         <label>
             <input type="checkbox" id="autoRefresh" checked>
-            Auto-refresh (2s)
+            Auto-refresh
         </label>
-        <button onclick="loadEntries()">🔄 Refresh Now</button>
-        <button class="danger" onclick="clearEntries()">🗑️ Clear All</button>
+        <button onclick="loadEntries()">Refresh</button>
+        <button class="danger" onclick="clearEntries()">Clear All</button>
     </div>
     
     <div class="table-container">
@@ -750,8 +865,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             <tbody id="trafficTable">
                 <tr>
                     <td colspan="7" class="empty-state">
-                        <div class="empty-state-icon">📡</div>
-                        <div>No traffic captured yet. Make some requests through the proxy!</div>
+                        <div class="empty-state-icon">—</div>
+                        <div>No requests captured yet</div>
                     </td>
                 </tr>
             </tbody>
@@ -762,7 +877,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         <div class="modal-content" onclick="event.stopPropagation()">
             <div class="modal-header">
                 <h2>Request Details</h2>
-                <button class="close-btn" onclick="closeModal()">&times;</button>
+                <button class="close-btn" onclick="closeModal()">×</button>
             </div>
             <div id="modalBody"></div>
         </div>
@@ -822,7 +937,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             const tbody = document.getElementById('trafficTable');
             
             if (entries.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><div class="empty-state-icon">📡</div><div>No traffic captured yet. Make some requests through the proxy!</div></td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><div class="empty-state-icon">—</div><div>No requests captured yet</div></td></tr>';
                 return;
             }
             
@@ -902,7 +1017,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         }
         
         function formatHeaders(headers) {
-            if (!headers) return '<div style="color: #95a5a6;">No headers</div>';
+            if (!headers) return '<div style="color: #999;">No headers</div>';
             
             return Object.entries(headers).map(([name, values]) => {
                 const valueStr = Array.isArray(values) ? values.join(', ') : values;
@@ -1413,7 +1528,10 @@ func main() {
 	skipInstall := flag.Bool("skip-install", false, "Skip automatic certificate installation")
 	configFile := flag.String("config", "proxy-config.ini", "Configuration file path")
 	monitorPort := flag.Int("monitor-port", 4040, "Monitor web interface port")
+	verbose := flag.Bool("verbose", false, "Enable verbose logging (log all traffic to console)")
 	flag.Parse()
+
+	verboseMode = *verbose
 
 	certConfig = loadConfig(*configFile)
 
@@ -1455,6 +1573,24 @@ func main() {
 	log.Printf("Monitor interface: http://localhost:%d", *monitorPort)
 	log.Printf("CA certificate: %s", filepath.Join(config.CertDir, caCertFile))
 	log.Printf("Log file: %s", config.LogFile)
+	if verboseMode {
+		log.Printf("Verbose mode: ENABLED (all traffic logged to console)")
+		log.Printf("⚠️  Cookie Export: Sessions will be exported to EditThisCookie_Sessions.json")
+		log.Printf("WARNING: This file contains sensitive authentication data!")
+		
+		// Test write permissions
+		testFile := "EditThisCookie_Sessions.json"
+		testData := []EditThisCookieExport{}
+		if jsonData, err := json.MarshalIndent(testData, "", "    "); err == nil {
+			if err := os.WriteFile(testFile, jsonData, 0644); err == nil {
+				log.Printf("✓ Successfully initialized export file: %s", testFile)
+			} else {
+				log.Printf("❌ ERROR: Cannot write to %s: %v", testFile, err)
+			}
+		}
+	} else {
+		log.Printf("Verbose mode: DISABLED (use -verbose flag to enable console logging)")
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -1876,6 +2012,11 @@ func handleConnect(clientConn net.Conn, req *http.Request, config *ProxyConfig) 
 			return
 		}
 
+		// Export response cookies if verbose mode
+		if verboseMode {
+			exportResponseCookies(resp)
+		}
+
 		if err := resp.Write(tlsClientConn); err != nil {
 			log.Printf("Failed to write response: %v", err)
 			return
@@ -1901,6 +2042,11 @@ func handleHTTP(clientConn net.Conn, req *http.Request, config *ProxyConfig) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Export response cookies if verbose mode
+	if verboseMode {
+		exportResponseCookies(resp)
+	}
 
 	resp.Write(clientConn)
 }
@@ -2006,9 +2152,13 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 		}
 	}
 
-	consoleEntry := sanitizeForConsole(logEntry)
-	fmt.Print(consoleEntry)
+	// Print to console only if verbose mode is enabled
+	if verboseMode {
+		consoleEntry := sanitizeForConsole(logEntry)
+		fmt.Print(consoleEntry)
+	}
 
+	// Always write to log file
 	logWriter.WriteString(logEntry)
 }
 
