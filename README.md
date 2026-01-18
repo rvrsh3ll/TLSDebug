@@ -34,12 +34,6 @@ The proxy automatically generates a CA certificate (`proxy-ca.crt`) and attempts
 
 ### Windows
 
-**Automatic (Recommended):**
-```cmd
-# Run as Administrator
-install-cert-windows.bat
-```
-
 **Command Line:**
 ```cmd
 # User store
