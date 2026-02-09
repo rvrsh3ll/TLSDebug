@@ -442,8 +442,22 @@ func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
 	if req.Body != nil && (req.Method == "POST" || req.Method == "PUT" || req.Method == "PATCH") {
 		bodyBytes, err := readAndRestoreRequestBody(req)
 		if err == nil && bodyBytes != nil {
-			if !isBinaryContent(bodyBytes) {
-				bodyStr := string(bodyBytes)
+			// Try to decompress if gzip encoded
+			displayBytes := bodyBytes
+			contentEncoding := req.Header.Get("Content-Encoding")
+			if contentEncoding == "gzip" && len(bodyBytes) > 0 {
+				gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+				if err == nil {
+					decompressed, err := io.ReadAll(gzipReader)
+					gzipReader.Close()
+					if err == nil {
+						displayBytes = decompressed
+					}
+				}
+			}
+			
+			if !isBinaryContent(displayBytes) {
+				bodyStr := string(displayBytes)
 				contentType := req.Header.Get("Content-Type")
 
 				// Try JSON OAuth tokens
@@ -783,24 +797,43 @@ func readAndRestoreRequestBody(req *http.Request) ([]byte, error) {
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
 	
 	// Remove Transfer-Encoding: chunked if present, since we now have Content-Length
+	// Note: This is different from Content-Encoding (gzip, br, etc.)
 	req.Header.Del("Transfer-Encoding")
 
 	return bodyBytes, nil
 }
 
 func sanitizeForConsole(data string) string {
+	// If the data looks like it contains a lot of escape sequences, it's probably binary
+	escapeCount := strings.Count(data, "\\x")
+	if escapeCount > 50 {
+		return "[Binary/encoded data, " + fmt.Sprintf("%d", len(data)) + " bytes - use log file to view]"
+	}
+
 	var result strings.Builder
 	result.Grow(len(data))
+	consecutiveEscapes := 0
+	maxConsecutiveEscapes := 10
 
 	for _, r := range data {
 		if r == '\n' || r == '\r' || r == '\t' {
 			result.WriteRune(r)
+			consecutiveEscapes = 0
 		} else if r >= 32 && r < 127 {
 			result.WriteRune(r)
+			consecutiveEscapes = 0
 		} else if r >= 128 {
 			result.WriteRune(r)
+			consecutiveEscapes = 0
 		} else {
-			result.WriteString(fmt.Sprintf("\\x%02x", r))
+			if consecutiveEscapes < maxConsecutiveEscapes {
+				result.WriteString(fmt.Sprintf("\\x%02x", r))
+				consecutiveEscapes++
+			} else if consecutiveEscapes == maxConsecutiveEscapes {
+				result.WriteString("...[binary data truncated]")
+				consecutiveEscapes++
+			}
+			// Skip further escapes after truncation message
 		}
 	}
 
@@ -812,6 +845,35 @@ func isBinaryContent(data []byte) bool {
 		return false
 	}
 
+	// Check for common binary file signatures
+	if len(data) >= 4 {
+		// PNG signature
+		if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+			return true
+		}
+		// JPEG signature
+		if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+			return true
+		}
+		// PDF signature
+		if data[0] == 0x25 && data[1] == 0x50 && data[2] == 0x44 && data[3] == 0x46 {
+			return true
+		}
+		// ZIP signature
+		if data[0] == 0x50 && data[1] == 0x4B && data[2] == 0x03 && data[3] == 0x04 {
+			return true
+		}
+		// GIF signature
+		if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+			return true
+		}
+		// Gzip signature
+		if data[0] == 0x1F && data[1] == 0x8B {
+			return true
+		}
+	}
+
+	// Sample first 512 bytes or entire content if smaller
 	sampleSize := 512
 	if len(data) < sampleSize {
 		sampleSize = len(data)
@@ -819,18 +881,41 @@ func isBinaryContent(data []byte) bool {
 
 	nullCount := 0
 	controlCount := 0
+	nonPrintableCount := 0
 
 	for i := 0; i < sampleSize; i++ {
 		b := data[i]
 		if b == 0 {
 			nullCount++
 		}
+		// Count control characters (except common text ones)
 		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
 			controlCount++
 		}
+		// Count bytes outside printable ASCII and common UTF-8 ranges
+		if b < 32 && b != '\n' && b != '\r' && b != '\t' {
+			nonPrintableCount++
+		} else if b == 127 || (b >= 128 && b < 160) {
+			nonPrintableCount++
+		}
 	}
 
-	return nullCount > sampleSize/10 || controlCount > sampleSize*3/10
+	// If more than 10% null bytes, it's binary
+	if nullCount > sampleSize/10 {
+		return true
+	}
+
+	// If more than 30% control characters, it's binary
+	if controlCount > sampleSize*3/10 {
+		return true
+	}
+
+	// If more than 20% non-printable characters, it's binary
+	if nonPrintableCount > sampleSize/5 {
+		return true
+	}
+
+	return false
 }
 
 // ============================================================================
@@ -2716,11 +2801,26 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 		bodyBytes, err := readAndRestoreRequestBody(req)
 		if err == nil && bodyBytes != nil {
 			contentType := req.Header.Get("Content-Type")
+			contentEncoding := req.Header.Get("Content-Encoding")
 
-			if isBinaryContent(bodyBytes) {
-				logEntry = logEntry + fmt.Sprintf("Body: [Binary data, %d bytes]\n", len(bodyBytes))
+			// Try to decompress if gzip encoded
+			displayBytes := bodyBytes
+			if contentEncoding == "gzip" && len(bodyBytes) > 0 {
+				gzipReader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+				if err == nil {
+					decompressed, err := io.ReadAll(gzipReader)
+					gzipReader.Close()
+					if err == nil {
+						displayBytes = decompressed
+						logEntry = logEntry + fmt.Sprintf("Body (decompressed from gzip, original size: %d bytes):\n", len(bodyBytes))
+					}
+				}
+			}
+
+			if isBinaryContent(displayBytes) {
+				logEntry = logEntry + fmt.Sprintf("Body: [Binary data, %d bytes]\n", len(displayBytes))
 			} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-				params, err := url.ParseQuery(string(bodyBytes))
+				params, err := url.ParseQuery(string(displayBytes))
 				if err == nil && len(params) > 0 {
 					logEntry = logEntry + "POST Parameters:\n"
 					for key, values := range params {
@@ -2729,11 +2829,11 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 						}
 					}
 				}
-			} else if len(bodyBytes) > 0 {
+			} else if len(displayBytes) > 0 {
 				maxBodySize := 10240
-				bodyStr := string(bodyBytes)
-				if len(bodyBytes) > maxBodySize {
-					bodyStr = string(bodyBytes[:maxBodySize]) + fmt.Sprintf("... [truncated, %d more bytes]", len(bodyBytes)-maxBodySize)
+				bodyStr := string(displayBytes)
+				if len(displayBytes) > maxBodySize {
+					bodyStr = string(displayBytes[:maxBodySize]) + fmt.Sprintf("... [truncated, %d more bytes]", len(displayBytes)-maxBodySize)
 				}
 				logEntry = logEntry + fmt.Sprintf("Body: %s\n", bodyStr)
 			}
