@@ -1244,6 +1244,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             z-index: 1000;
             padding: 20px;
             overflow-y: auto;
+            overflow-x: hidden;
         }
         
         .modal-content {
@@ -1253,6 +1254,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             border-radius: 4px;
             padding: 30px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-height: 90vh;
+            overflow-y: auto;
         }
         
         .modal-header {
@@ -1285,6 +1288,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         
         .detail-section {
             margin-bottom: 25px;
+            overflow-x: auto;
         }
         
         .detail-section h3 {
@@ -1304,6 +1308,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             padding: 15px;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
+            overflow-x: auto;
         }
         
         .detail-grid .label {
@@ -1314,9 +1319,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         
         .detail-grid .value {
             color: #333;
-    		font-size: 13px;
-   	 		word-break: break-all;
-    		overflow-wrap: break-word;
+            font-size: 13px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+            max-width: 100%;
+            font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
+            line-height: 1.5;
         }
         
         .headers-list {
@@ -1422,6 +1431,24 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             .stats {
                 flex-direction: column;
                 gap: 15px;
+            }
+            
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .detail-grid .label {
+                font-weight: 700;
+                margin-top: 10px;
+            }
+            
+            .detail-grid .label:first-child {
+                margin-top: 0;
+            }
+            
+            .modal-content {
+                margin: 10px;
+                padding: 20px;
             }
         }
     </style>
