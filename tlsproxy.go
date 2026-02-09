@@ -212,7 +212,7 @@ var (
 // JWT PARSING
 // ============================================================================
 
-func parseJWT(tokenString string, source string, url string) *JWTToken {
+func parseJWT(tokenString string, source string, requestURL string) *JWTToken {
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
 		return nil
@@ -246,7 +246,7 @@ func parseJWT(tokenString string, source string, url string) *JWTToken {
 		Payload:   payload,
 		Signature: parts[2],
 		Source:    source,
-		URL:       url,
+		URL:       requestURL,
 		Timestamp: time.Now(),
 	}
 
@@ -287,7 +287,7 @@ func base64DecodeSegment(seg string) ([]byte, error) {
 // TOKEN EXTRACTION
 // ============================================================================
 
-func extractJWTFromString(text string, source string, url string) []*JWTToken {
+func extractJWTFromString(text string, source string, requestURL string) []*JWTToken {
 	var tokens []*JWTToken
 	
 	// Pattern: eyJ... (typical JWT start)
@@ -297,7 +297,7 @@ func extractJWTFromString(text string, source string, url string) []*JWTToken {
 		word = strings.Trim(word, `"',;:()[]{}`)
 		
 		if strings.HasPrefix(word, "eyJ") && strings.Count(word, ".") == 2 {
-			if jwt := parseJWT(word, source, url); jwt != nil {
+			if jwt := parseJWT(word, source, requestURL); jwt != nil {
 				tokens = append(tokens, jwt)
 			}
 		}
@@ -306,7 +306,7 @@ func extractJWTFromString(text string, source string, url string) []*JWTToken {
 	return tokens
 }
 
-func extractOAuthTokensFromJSON(body string, source string, url string) *OAuthToken {
+func extractOAuthTokensFromJSON(body string, source string, requestURL string) *OAuthToken {
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(body), &data); err != nil {
 		return nil
@@ -314,7 +314,7 @@ func extractOAuthTokensFromJSON(body string, source string, url string) *OAuthTo
 
 	token := &OAuthToken{
 		Source:    source,
-		URL:       url,
+		URL:       requestURL,
 		Timestamp: time.Now(),
 	}
 
@@ -349,7 +349,7 @@ func extractOAuthTokensFromJSON(body string, source string, url string) *OAuthTo
 	return token
 }
 
-func extractOAuthTokensFromForm(body string, source string, url string) *OAuthToken {
+func extractOAuthTokensFromForm(body string, source string, requestURL string) *OAuthToken {
 	values, err := url.ParseQuery(body)
 	if err != nil {
 		return nil
@@ -357,7 +357,7 @@ func extractOAuthTokensFromForm(body string, source string, url string) *OAuthTo
 
 	token := &OAuthToken{
 		Source:    source,
-		URL:       url,
+		URL:       requestURL,
 		Timestamp: time.Now(),
 	}
 
