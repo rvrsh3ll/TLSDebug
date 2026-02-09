@@ -1873,13 +1873,13 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             return Object.entries(headers).map(([name, values]) => {
                 const valueStr = Array.isArray(values) ? values.join(', ') : values;
                 const headerId = 'header-' + Math.random().toString(36).substr(2, 9);
-                return `<div class="header-item">
-                    <div class="header-content">
-                        <span class="header-name">${escapeHtml(name)}</span>
-                        <span class="header-value" id="${headerId}">${escapeHtml(valueStr)}</span>
-                    </div>
-                    <button class="copy-btn" onclick="copyHeaderValue('${headerId}', this); event.stopPropagation();">Copy</button>
-                </div>`;
+                return '<div class="header-item">' +
+                    '<div class="header-content">' +
+                        '<span class="header-name">' + escapeHtml(name) + '</span>' +
+                        '<span class="header-value" id="' + headerId + '">' + escapeHtml(valueStr) + '</span>' +
+                    '</div>' +
+                    '<button class="copy-btn" onclick="copyHeaderValue(\'' + headerId + '\', this); event.stopPropagation();">Copy</button>' +
+                '</div>';
             }).join('');
         }
         
