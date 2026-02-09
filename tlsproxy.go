@@ -440,10 +440,8 @@ func (m *TokenExportModule) ProcessRequest(req *http.Request) error {
 
 	// Extract from request body (POST/PUT)
 	if req.Body != nil && (req.Method == "POST" || req.Method == "PUT" || req.Method == "PATCH") {
-		bodyBytes, err := io.ReadAll(req.Body)
-		if err == nil {
-			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-			
+		bodyBytes, err := readAndRestoreRequestBody(req)
+		if err == nil && bodyBytes != nil {
 			if !isBinaryContent(bodyBytes) {
 				bodyStr := string(bodyBytes)
 				contentType := req.Header.Get("Content-Type")
@@ -764,6 +762,31 @@ func exportResponseCookies(resp *http.Response) {
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
+
+// readAndRestoreRequestBody reads the request body and restores it,
+// properly setting Content-Length headers
+func readAndRestoreRequestBody(req *http.Request) ([]byte, error) {
+	if req.Body == nil {
+		return nil, nil
+	}
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Restore the body
+	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	
+	// Fix Content-Length header to prevent 411 errors
+	req.ContentLength = int64(len(bodyBytes))
+	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
+	
+	// Remove Transfer-Encoding: chunked if present, since we now have Content-Length
+	req.Header.Del("Transfer-Encoding")
+
+	return bodyBytes, nil
+}
 
 func sanitizeForConsole(data string) string {
 	var result strings.Builder
@@ -2414,10 +2437,12 @@ func forwardRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	outReq := &http.Request{
-		Method: req.Method,
-		URL:    req.URL,
-		Header: req.Header.Clone(),
-		Body:   req.Body,
+		Method:        req.Method,
+		URL:           req.URL,
+		Header:        req.Header.Clone(),
+		Body:          req.Body,
+		ContentLength: req.ContentLength,
+		Host:          req.Host,
 	}
 
 	outReq.RequestURI = ""
@@ -2461,10 +2486,8 @@ func logRequest(req *http.Request, config *ProxyConfig) {
 	}
 
 	if req.Method == http.MethodPost || req.Method == http.MethodPut || req.Method == http.MethodPatch {
-		bodyBytes, err := io.ReadAll(req.Body)
-		if err == nil {
-			req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
+		bodyBytes, err := readAndRestoreRequestBody(req)
+		if err == nil && bodyBytes != nil {
 			contentType := req.Header.Get("Content-Type")
 
 			if isBinaryContent(bodyBytes) {
