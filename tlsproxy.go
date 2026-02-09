@@ -1198,6 +1198,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             padding: 12px 20px;
             font-size: 13px;
             color: #333;
+            max-width: 300px;
+            word-break: break-word;
+            overflow-wrap: anywhere;
         }
         
         .method {
@@ -1226,6 +1229,9 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             color: #1976d2;
             word-break: break-all;
             font-size: 13px;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         
         .timestamp {
@@ -1250,12 +1256,15 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         .modal-content {
             background: #fff;
             max-width: 1200px;
+            width: calc(100vw - 40px);
             margin: 40px auto;
             border-radius: 4px;
             padding: 30px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             max-height: 90vh;
             overflow-y: auto;
+            overflow-x: hidden;
+            box-sizing: border-box;
         }
         
         .modal-header {
@@ -1271,6 +1280,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             color: #333;
             font-size: 18px;
             font-weight: 600;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            flex: 1;
+            margin-right: 15px;
         }
         
         .close-btn {
@@ -1289,6 +1302,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         .detail-section {
             margin-bottom: 25px;
             overflow-x: auto;
+            max-width: 100%;
         }
         
         .detail-section h3 {
@@ -1300,6 +1314,11 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             letter-spacing: 0.5px;
         }
         
+        #modalBody {
+            max-width: 100%;
+            overflow-x: hidden;
+        }
+        
         .detail-grid {
             display: grid;
             grid-template-columns: 150px 1fr;
@@ -1308,13 +1327,17 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             padding: 15px;
             border-radius: 4px;
             border: 1px solid #e0e0e0;
-            overflow-x: auto;
+            max-width: 100%;
+            width: 100%;
+            box-sizing: border-box;
         }
         
         .detail-grid .label {
             color: #666;
             font-weight: 600;
             font-size: 12px;
+            align-self: start;
+            padding-top: 2px;
         }
         
         .detail-grid .value {
@@ -1335,12 +1358,18 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             border: 1px solid #e0e0e0;
             font-family: 'Monaco', 'Menlo', 'Courier New', monospace;
             font-size: 12px;
+            max-width: 100%;
+            width: 100%;
+            box-sizing: border-box;
         }
         
         .header-item {
             margin-bottom: 6px;
             padding-bottom: 6px;
             border-bottom: 1px solid #e0e0e0;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            display: block;
         }
         
         .header-item:last-child {
@@ -1352,10 +1381,16 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
         .header-name {
             color: #1976d2;
             font-weight: 600;
+            word-break: break-word;
+            display: inline;
         }
         
         .header-value {
             color: #666;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+            display: inline;
         }
         
         .body-content {
@@ -1368,9 +1403,12 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
             line-height: 1.6;
             max-height: 600px;
             overflow-y: auto;
+            overflow-x: auto;
             white-space: pre-wrap;
             word-break: break-word;
+            overflow-wrap: anywhere;
             color: #d4d4d4;
+            max-width: 100%;
         }
         
         .body-content.json {
