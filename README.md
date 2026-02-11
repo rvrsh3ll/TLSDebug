@@ -355,20 +355,19 @@ openssl x509 -in proxy-ca.crt -text -noout
 
 ```bash
 # Linux
-GOOS=linux GOARCH=amd64 go build -o tlsproxy-linux tlsproxy.go
+GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o tlsproxy-linux tlsproxy.go
 
-# Windows
-GOOS=windows GOARCH=amd64 go build -o tlsproxy.exe tlsproxy.go
+# Windows (PowerShell)
+$env:GOOS="windows"; $env:GOARCH="amd64"; go build -ldflags "-s -w" -o tlsproxy.exe tlsproxy.go
+
+# Windows (CMD)
+set GOOS=windows&& set GOARCH=amd64&& go build -ldflags "-s -w" -o tlsproxy.exe tlsproxy.go
 
 # macOS (Intel)
-GOOS=darwin GOARCH=amd64 go build -o tlsproxy-mac tlsproxy.go
+GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o tlsproxy-mac tlsproxy.go
 
 # macOS (Apple Silicon)
-GOOS=darwin GOARCH=arm64 go build -o tlsproxy-mac-arm tlsproxy.go
-
-# Smaller Build
-
-go build -ldflags "-s -w"
+GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w" -o tlsproxy-mac-arm tlsproxy.go
 ```
 
 ## Files
